@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# EOL-PHP-SecAuto - Test Runner
+# EOL-PHP-SecAuto - Comprehensive Test Runner
 # ==============================================================================
 
 set -euo pipefail
@@ -9,8 +9,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 chmod +x "${SCRIPT_DIR}"/test-*.sh
 
+echo "1. Testing CLI Parser & Options..."
 "${SCRIPT_DIR}/test-cli-parser.sh"
-echo ""
+
+echo -e "\n2. Testing Dockerfile Generator & Static Compliance..."
 "${SCRIPT_DIR}/test-generator.sh"
-echo ""
-echo "All EOL-PHP-SecAuto tests passed successfully!"
+
+echo -e "\n3. Testing Container Runtime Guard Unit Tests..."
+php "${SCRIPT_DIR}/test-runtime-guard.php"
+
+echo -e "\nAll EOL-PHP-SecAuto test suites passed successfully!"

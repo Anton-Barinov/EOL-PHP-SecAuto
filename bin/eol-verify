@@ -1,24 +1,38 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# EOL-PHP-SecAuto - Container Security Compliance Verifier (eol-verify)
+# EOL-PHP-SecAuto - Container & Dockerfile Security Compliance Verifier (eol-verify)
 # Part of EOL-PHP-SecAuto by Anton Barinov
 # https://github.com/Anton-Barinov/EOL-PHP-SecAuto
 # ==============================================================================
 
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 TARGET_IMAGE=""
+TARGET_DOCKERFILE=""
 JSON_OUTPUT=0
 
 usage() {
     cat <<EOF
-Usage: eol-verify [options]
+EOL-PHP-SecAuto Verifier v${VERSION}
+Maintained by Anton Barinov <https://github.com/Anton-Barinov/EOL-PHP-SecAuto>
+
+Usage:
+  eol-verify [options]
 
 Options:
-  -t, --target <image>   Target Docker image to verify (e.g. php:7.4-fpm-hardened)
-  --json                 Output results in machine-readable JSON format
-  -h, --help             Show this help message
+  -t, --target <image>       Target Docker image to verify dynamically (requires Docker)
+  -d, --dockerfile <path>    Target Dockerfile to verify statically (no Docker required)
+  --json                     Output results in machine-readable JSON format
+  -h, --help                 Show this help message
+  -v, --version              Show version information
+
+Examples:
+  # Static Dockerfile audit:
+  eol-verify -d Dockerfile.hardened
+
+  # Live container audit:
+  eol-verify -t my-repo/php:7.4-fpm-hardened
 EOF
     exit 0
 }
@@ -26,23 +40,79 @@ EOF
 while [ $# -gt 0 ]; do
     case "$1" in
         -t|--target) TARGET_IMAGE="$2"; shift 2 ;;
+        -d|--dockerfile) TARGET_DOCKERFILE="$2"; shift 2 ;;
         --json) JSON_OUTPUT=1; shift ;;
+        -v|--version) echo "eol-verify v${VERSION}"; exit 0 ;;
         -h|--help) usage ;;
         *) echo "Unknown option: $1" >&2; usage ;;
     esac
 done
 
-if [ -z "$TARGET_IMAGE" ]; then
-    echo "Error: target image required (-t/--target)" >&2
-    exit 1
+if [ -z "$TARGET_IMAGE" ] && [ -z "$TARGET_DOCKERFILE" ]; then
+    echo "Error: target image (-t) or dockerfile (-d) is required." >&2
+    usage
 fi
 
+# Mode 1: Static Dockerfile Verification
+if [ -n "$TARGET_DOCKERFILE" ]; then
+    if [ ! -f "$TARGET_DOCKERFILE" ]; then
+        echo "Error: Dockerfile not found: ${TARGET_DOCKERFILE}" >&2
+        exit 1
+    fi
+
+    HAS_PROGRESS_DISABLE=$(grep -qi 'session\.upload_progress\.enabled\s*=\s*Off' "$TARGET_DOCKERFILE" && echo "true" || echo "false")
+    HAS_URL_INCLUDE_DISABLE=$(grep -qi 'allow_url_include\s*=\s*Off' "$TARGET_DOCKERFILE" && echo "true" || echo "false")
+    HAS_EXPOSE_DISABLE=$(grep -qi 'expose_php\s*=\s*Off' "$TARGET_DOCKERFILE" && echo "true" || echo "false")
+    HAS_RUNTIME_GUARD=$(grep -qi 'guard\.php' "$TARGET_DOCKERFILE" && echo "true" || echo "false")
+    HAS_PATCHED_ENV=$(grep -qi 'EOL_SECAUTO_PATCHED' "$TARGET_DOCKERFILE" && echo "true" || echo "false")
+
+    STATUS="COMPLIANT"
+    if [ "$HAS_PROGRESS_DISABLE" = "false" ] || [ "$HAS_URL_INCLUDE_DISABLE" = "false" ]; then
+        STATUS="NON-COMPLIANT"
+    fi
+
+    if [ "$JSON_OUTPUT" -eq 1 ]; then
+        cat <<EOF
+{
+  "target_type": "dockerfile",
+  "target": "${TARGET_DOCKERFILE}",
+  "compliance_status": "${STATUS}",
+  "checks": {
+    "upload_progress_disabled": ${HAS_PROGRESS_DISABLE},
+    "allow_url_include_disabled": ${HAS_URL_INCLUDE_DISABLE},
+    "expose_php_disabled": ${HAS_EXPOSE_DISABLE},
+    "runtime_guard_included": ${HAS_RUNTIME_GUARD},
+    "secauto_signature_present": ${HAS_PATCHED_ENV}
+  }
+}
+EOF
+        [ "$STATUS" = "COMPLIANT" ] && exit 0 || exit 1
+    fi
+
+    echo "=========================================================="
+    echo "  EOL-PHP-SecAuto Static Dockerfile Audit Report"
+    echo "  Target: ${TARGET_DOCKERFILE}"
+    echo "=========================================================="
+    if [ "$STATUS" = "COMPLIANT" ]; then
+        echo "  Status: [ PASS: COMPLIANT ]"
+    else
+        echo "  Status: [ FAIL: NON-COMPLIANT ]"
+    fi
+    echo "  - Upload Progress Mitigated: $([ "$HAS_PROGRESS_DISABLE" = "true" ] && echo "YES" || echo "NO")"
+    echo "  - Allow URL Include Disabled: $([ "$HAS_URL_INCLUDE_DISABLE" = "true" ] && echo "YES" || echo "NO")"
+    echo "  - Expose PHP Disabled:       $([ "$HAS_EXPOSE_DISABLE" = "true" ] && echo "YES" || echo "NO")"
+    echo "  - Runtime Guard Attached:    $([ "$HAS_RUNTIME_GUARD" = "true" ] && echo "YES" || echo "NO")"
+    echo "  - Hardened Signature:        $([ "$HAS_PATCHED_ENV" = "true" ] && echo "YES" || echo "NO")"
+    echo "=========================================================="
+    [ "$STATUS" = "COMPLIANT" ] && exit 0 || exit 1
+fi
+
+# Mode 2: Dynamic Container Verification (Requires Docker)
 if ! command -v docker >/dev/null 2>&1; then
-    echo "Error: docker command required for eol-verify" >&2
+    echo "Error: docker command is required for live container verification (-t). Use -d for static Dockerfile verification." >&2
     exit 1
 fi
 
-# Run verification command inside container
 INSPECT_CMD='php -r "
     \$progress = (int)ini_get(\"session.upload_progress.enabled\");
     \$include  = (int)ini_get(\"allow_url_include\");
@@ -63,7 +133,8 @@ fi
 if [ "$JSON_OUTPUT" -eq 1 ]; then
     cat <<EOF
 {
-  "target_image": "${TARGET_IMAGE}",
+  "target_type": "container_image",
+  "target": "${TARGET_IMAGE}",
   "compliance_status": "${STATUS}",
   "checks": {
     "upload_progress_disabled": $([ "$UPLOAD_PROGRESS" = "0" ] && echo "true" || echo "false"),

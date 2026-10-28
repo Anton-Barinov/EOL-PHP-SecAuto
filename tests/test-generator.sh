@@ -8,6 +8,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SECAUTO="${SCRIPT_DIR}/../bin/eol-php-secauto"
+VERIFIER="${SCRIPT_DIR}/../bin/eol-verify"
 
 echo "=== Running EOL-PHP-SecAuto Generator Tests ==="
 
@@ -28,12 +29,21 @@ for tc in "${test_cases[@]}"; do
     tmp_out=$(mktemp)
 
     if "$SECAUTO" -b "$base" -s "$strat" -o "$tmp_out" >/dev/null 2>&1; then
-        # Assert Dockerfile contains expected elements
+        # 1. Assert Dockerfile contains expected elements
         if grep -q "FROM ${base}" "$tmp_out" && grep -q "EOL-PHP-SecAuto" "$tmp_out"; then
             echo "  [PASS] Base: ${base} (Strategy: ${strat}) -> Valid Dockerfile generated."
             PASSED=$((PASSED + 1))
         else
             echo "  [FAIL] Base: ${base} (Strategy: ${strat}) -> Missing expected Dockerfile directives!"
+            FAILED=$((FAILED + 1))
+        fi
+
+        # 2. Assert eol-verify -d validates the generated Dockerfile as COMPLIANT
+        if "$VERIFIER" -d "$tmp_out" >/dev/null 2>&1; then
+            echo "  [PASS] Base: ${base} -> Static compliance verified by eol-verify."
+            PASSED=$((PASSED + 1))
+        else
+            echo "  [FAIL] Base: ${base} -> Failed static compliance check!"
             FAILED=$((FAILED + 1))
         fi
     else

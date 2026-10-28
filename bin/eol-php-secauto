@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 REPO_URL="https://github.com/Anton-Barinov/EOL-PHP-SecAuto"
 
 # Default configuration
@@ -17,6 +17,7 @@ STRATEGY="hybrid" # 'full-compile', 'hotpatch', 'hybrid'
 FLAVOR="enhanced-universal" # 'enhanced-universal', 'minimal'
 DOCKERFILE_IN=""
 OUTPUT_DOCKERFILE=""
+EXTRA_INI=""
 DO_BUILD=0
 DO_PUSH=0
 DO_VERIFY=0
@@ -57,6 +58,7 @@ Options:
   -f, --flavor <flavor>    Patch flavor: 'enhanced-universal' (default), 'minimal'
   -d, --dockerfile <path>  Inspect base image from an existing Dockerfile
   -o, --output <path>      Save generated hardened Dockerfile to specified path
+  --extra-ini "<directives>" Add custom php.ini directives (e.g. "memory_limit=1G; opcache.enable=1")
   --build                  Execute 'docker build' automatically
   --push                   Execute 'docker push' after successful build
   --verify                 Perform security & compliance check on the resulting image
@@ -86,6 +88,7 @@ while [ $# -gt 0 ]; do
         -f|--flavor) FLAVOR="$2"; shift 2 ;;
         -d|--dockerfile) DOCKERFILE_IN="$2"; shift 2 ;;
         -o|--output) OUTPUT_DOCKERFILE="$2"; shift 2 ;;
+        --extra-ini) EXTRA_INI="$2"; shift 2 ;;
         --build) DO_BUILD=1; shift ;;
         --push) DO_PUSH=1; shift ;;
         --verify) DO_VERIFY=1; shift ;;
@@ -96,13 +99,17 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# If Dockerfile is provided, extract FROM image
+# If Dockerfile is provided, extract FROM image (handling multi-stage builds)
 if [ -n "$DOCKERFILE_IN" ]; then
     if [ ! -f "$DOCKERFILE_IN" ]; then
         echo -e "${RED}[ERROR] Specified Dockerfile not found: ${DOCKERFILE_IN}${NC}" >&2
         exit 1
     fi
-    EXTRACTED_BASE=$(grep -i '^FROM' "$DOCKERFILE_IN" | head -n 1 | awk '{print $2}')
+    # Search for stage with 'php' first; otherwise take the last FROM
+    EXTRACTED_BASE=$(grep -i '^FROM.*php' "$DOCKERFILE_IN" 2>/dev/null | tail -n 1 | awk '{print $2}' || true)
+    if [ -z "$EXTRACTED_BASE" ]; then
+        EXTRACTED_BASE=$(grep -i '^FROM' "$DOCKERFILE_IN" | tail -n 1 | awk '{print $2}')
+    fi
     if [ -n "$EXTRACTED_BASE" ]; then
         BASE_IMAGE="$EXTRACTED_BASE"
     fi
@@ -120,10 +127,10 @@ detect_image_metadata() {
     local sapi="fpm"
     local distro="debian"
 
-    # Extract version
-    if [[ "$img" =~ php:([5-8]\.[0-9]) ]]; then
+    # Extract version (supports 7.4, 7.4.33, 5.6.40, etc.)
+    if [[ "$img" =~ php:([5-8]\.[0-9])(\.[0-9]+)? ]]; then
         raw_ver="${BASH_REMATCH[1]}"
-    elif [[ "$img" =~ ([5-8]\.[0-9]) ]]; then
+    elif [[ "$img" =~ ([5-8]\.[0-9])(\.[0-9]+)? ]]; then
         raw_ver="${BASH_REMATCH[1]}"
     fi
 
@@ -158,12 +165,9 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Resolve patch file path
 PATCH_FILE="patches/php-${PHP_VER}/php-${PHP_VER}-${FLAVOR}.patch"
 if [ ! -f "${ROOT_DIR}/${PATCH_FILE}" ]; then
-    # Fallback to minimal if enhanced not found
     PATCH_FILE="patches/php-${PHP_VER}/php-${PHP_VER}-minimal.patch"
 fi
-
 if [ ! -f "${ROOT_DIR}/${PATCH_FILE}" ]; then
-    # Fallback to community backport
     PATCH_FILE="patches/php-${PHP_VER}/php-${PHP_VER}-community-backport.patch"
 fi
 
@@ -175,6 +179,7 @@ generate_dockerfile() {
     local distro="$4"
     local strat="$5"
     local patch_path="$6"
+    local extra="$7"
 
     cat <<EOF
 # ==============================================================================
@@ -217,6 +222,13 @@ EOF
 # --- Stage 1: Build & Patch php-src ---
 FROM debian:bullseye-slim AS builder
 ENV DEBIAN_FRONTEND=noninteractive
+
+# Fix EOL Debian APT sources if necessary
+RUN if [ -f /etc/apt/sources.list ]; then \\
+        sed -i 's/deb.debian.org/archive.debian.org/g' /etc/apt/sources.list 2>/dev/null || true; \\
+        sed -i 's|security.debian.org/debian-security|archive.debian.org/debian-security|g' /etc/apt/sources.list 2>/dev/null || true; \\
+    fi
+
 RUN apt-get update && apt-get install -y --no-install-recommends \\
     build-essential autoconf bison re2c git patch curl ca-certificates \\
     libxml2-dev libssl-dev libsqlite3-dev zlib1g-dev libcurl4-openssl-dev
@@ -242,7 +254,7 @@ EOF
         fi
     fi
 
-    # Runtime WAF Guard and INI Hardening Layer (Applies to 'hybrid' and 'hotpatch')
+    # Runtime WAF Guard and INI Hardening Layer
     cat <<EOF
 # --- Hardening & Compliance Layer ---
 FROM ${base}
@@ -255,7 +267,15 @@ LABEL org.opencontainers.image.version="${VERSION}"
 
 USER root
 
-# 1. Neutralize CVE-2026-109618/19/60 (php2shell) & CVE-2024-4577 via php.ini baseline
+# 1. EOL APT Archive Sources fix for older Debian (Jessie/Stretch/Buster)
+RUN if [ -f /etc/apt/sources.list ]; then \\
+        sed -i 's/deb.debian.org/archive.debian.org/g' /etc/apt/sources.list 2>/dev/null || true; \\
+        sed -i 's|security.debian.org/debian-security|archive.debian.org/debian-security|g' /etc/apt/sources.list 2>/dev/null || true; \\
+        sed -i '/stretch-updates/d' /etc/apt/sources.list 2>/dev/null || true; \\
+        sed -i '/buster-updates/d' /etc/apt/sources.list 2>/dev/null || true; \\
+    fi
+
+# 2. Neutralize CVE-2026-109618/19/60 (php2shell) & CVE-2024-4577 via php.ini baseline
 RUN set -eux; \\
     ini_dir=\$(php -r 'echo php_ini_loaded_file() ? dirname(php_ini_loaded_file()) : "/usr/local/etc/php/conf.d";'); \\
     mkdir -p "\$ini_dir"; \\
@@ -266,23 +286,36 @@ RUN set -eux; \\
         echo 'expose_php = Off'; \\
         echo 'phar.readonly = On'; \\
         echo 'disable_functions = exec,passthru,shell_exec,system,proc_open,popen,parse_ini_file,show_source,dl'; \\
+EOF
+
+    if [ -n "$extra" ]; then
+        IFS=';' read -ra DIRECTIVES <<< "$extra"
+        for d in "${DIRECTIVES[@]}"; do
+            trimmed=$(echo "$d" | xargs)
+            if [ -n "$trimmed" ]; then
+                echo "        echo '${trimmed}'; \\"
+            fi
+        done
+    fi
+
+    cat <<EOF
     } > "\$ini_dir/99-eol-secauto-hardening.ini"
 
-# 2. Deploy Zero-Downtime Runtime WAF Guard
+# 3. Deploy Zero-Downtime Runtime WAF Guard
 RUN mkdir -p /opt/secauto-guard
 COPY scripts/runtime-guard.php /opt/secauto-guard/guard.php
 RUN set -eux; \\
     ini_dir=\$(php -r 'echo php_ini_loaded_file() ? dirname(php_ini_loaded_file()) : "/usr/local/etc/php/conf.d";'); \\
     echo 'auto_prepend_file = "/opt/secauto-guard/guard.php"' >> "\$ini_dir/99-eol-secauto-hardening.ini"
 
-# 3. Security Verification Signature
+# 4. Security Verification Signature
 ENV EOL_SECAUTO_PATCHED=1
 ENV EOL_SECAUTO_VERSION="${VERSION}"
 
 EOF
 }
 
-GENERATED_DOCKERFILE_CONTENT=$(generate_dockerfile "$BASE_IMAGE" "$PHP_VER" "$SAPI" "$DISTRO" "$STRATEGY" "$PATCH_FILE")
+GENERATED_DOCKERFILE_CONTENT=$(generate_dockerfile "$BASE_IMAGE" "$PHP_VER" "$SAPI" "$DISTRO" "$STRATEGY" "$PATCH_FILE" "$EXTRA_INI")
 
 # Handle Output
 if [ -n "$OUTPUT_DOCKERFILE" ]; then
@@ -331,6 +364,9 @@ echo -e "Target Tag:    ${BOLD}${TARGET_TAG}${NC}"
 echo -e "Detected:      PHP ${BOLD}${PHP_VER}${NC} | SAPI: ${BOLD}${SAPI}${NC} | OS: ${BOLD}${DISTRO}${NC}"
 echo -e "Strategy:      ${BOLD}${STRATEGY}${NC}"
 echo -e "Patch Flavor:  ${BOLD}${FLAVOR}${NC} (${PATCH_FILE})"
+if [ -n "$EXTRA_INI" ]; then
+    echo -e "Extra INI:     ${CYAN}${EXTRA_INI}${NC}"
+fi
 echo -e "${CYAN}----------------------------------------------------------------------${NC}"
 echo -e "${BOLD}Mitigated Vulnerabilities:${NC}"
 echo -e "  ✓ ${GREEN}CVE-2026-109618 / CVE-2026-109619 / CVE-2026-115560${NC} (php2shell RCE)"
