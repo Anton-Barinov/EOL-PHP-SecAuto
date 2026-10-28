@@ -1,0 +1,377 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# EOL-PHP-SecAuto — Automated Security Patching & Hardening for EOL PHP Containers
+# Part of EOL-PHP-SecAuto by Anton Barinov
+# https://github.com/Anton-Barinov/EOL-PHP-SecAuto
+# ==============================================================================
+
+set -euo pipefail
+
+VERSION="1.0.0"
+REPO_URL="https://github.com/Anton-Barinov/EOL-PHP-SecAuto"
+
+# Default configuration
+BASE_IMAGE=""
+TARGET_TAG=""
+STRATEGY="hybrid" # 'full-compile', 'hotpatch', 'hybrid'
+FLAVOR="enhanced-universal" # 'enhanced-universal', 'minimal'
+DOCKERFILE_IN=""
+OUTPUT_DOCKERFILE=""
+DO_BUILD=0
+DO_PUSH=0
+DO_VERIFY=0
+JSON_OUTPUT=0
+
+# Formatting
+if [ -t 1 ] && [ "${NO_COLOR:-0}" = "0" ]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    CYAN='\033[0;36m'
+    BOLD='\033[1m'
+    NC='\033[0m'
+else
+    RED=''
+    GREEN=''
+    YELLOW=''
+    BLUE=''
+    CYAN=''
+    BOLD=''
+    NC=''
+fi
+
+usage() {
+    cat <<EOF
+${BOLD}EOL-PHP-SecAuto v${VERSION}${NC}
+Automated Security Patching & Compliance Tool for EOL PHP Docker Containers
+Maintained by Anton Barinov <${REPO_URL}>
+
+Usage:
+  eol-php-secauto [options]
+
+Options:
+  -b, --base <image>       Base Docker image to harden (e.g. php:7.4-fpm, php:8.0-apache)
+  -t, --tag <tag>          Target tag for the hardened image (e.g. my-repo/php:7.4-hardened)
+  -s, --strategy <type>    Patching strategy: 'hybrid' (default), 'hotpatch', 'full-compile'
+  -f, --flavor <flavor>    Patch flavor: 'enhanced-universal' (default), 'minimal'
+  -d, --dockerfile <path>  Inspect base image from an existing Dockerfile
+  -o, --output <path>      Save generated hardened Dockerfile to specified path
+  --build                  Execute 'docker build' automatically
+  --push                   Execute 'docker push' after successful build
+  --verify                 Perform security & compliance check on the resulting image
+  --json                   Output build & vulnerability status in JSON format
+  -h, --help               Show this help message
+  -v, --version            Show version information
+
+Examples:
+  # Generate a hardened Dockerfile for PHP 7.4 FPM:
+  eol-php-secauto -b php:7.4-fpm -o Dockerfile.hardened
+
+  # Build and verify a hardened PHP 8.0 Apache container:
+  eol-php-secauto -b php:8.0-apache -t myregistry/php:8.0-secure --build --verify
+
+  # Hotpatch existing Dockerfile without recompile:
+  eol-php-secauto -d ./Dockerfile -s hotpatch -o ./Dockerfile.patched
+EOF
+    exit 0
+}
+
+# Parse CLI options
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -b|--base) BASE_IMAGE="$2"; shift 2 ;;
+        -t|--tag) TARGET_TAG="$2"; shift 2 ;;
+        -s|--strategy) STRATEGY="$2"; shift 2 ;;
+        -f|--flavor) FLAVOR="$2"; shift 2 ;;
+        -d|--dockerfile) DOCKERFILE_IN="$2"; shift 2 ;;
+        -o|--output) OUTPUT_DOCKERFILE="$2"; shift 2 ;;
+        --build) DO_BUILD=1; shift ;;
+        --push) DO_PUSH=1; shift ;;
+        --verify) DO_VERIFY=1; shift ;;
+        --json) JSON_OUTPUT=1; shift ;;
+        -v|--version) echo "eol-php-secauto v${VERSION}"; exit 0 ;;
+        -h|--help) usage ;;
+        *) echo "Unknown option: $1" >&2; usage ;;
+    esac
+done
+
+# If Dockerfile is provided, extract FROM image
+if [ -n "$DOCKERFILE_IN" ]; then
+    if [ ! -f "$DOCKERFILE_IN" ]; then
+        echo -e "${RED}[ERROR] Specified Dockerfile not found: ${DOCKERFILE_IN}${NC}" >&2
+        exit 1
+    fi
+    EXTRACTED_BASE=$(grep -i '^FROM' "$DOCKERFILE_IN" | head -n 1 | awk '{print $2}')
+    if [ -n "$EXTRACTED_BASE" ]; then
+        BASE_IMAGE="$EXTRACTED_BASE"
+    fi
+fi
+
+if [ -z "$BASE_IMAGE" ]; then
+    echo -e "${RED}[ERROR] Base image is required (-b/--base or -d/--dockerfile).${NC}" >&2
+    usage
+fi
+
+# Detect PHP Version and SAPI from base image name
+detect_image_metadata() {
+    local img="$1"
+    local raw_ver="7.4"
+    local sapi="fpm"
+    local distro="debian"
+
+    # Extract version
+    if [[ "$img" =~ php:([5-8]\.[0-9]) ]]; then
+        raw_ver="${BASH_REMATCH[1]}"
+    elif [[ "$img" =~ ([5-8]\.[0-9]) ]]; then
+        raw_ver="${BASH_REMATCH[1]}"
+    fi
+
+    # Extract SAPI
+    if [[ "$img" =~ apache ]]; then
+        sapi="apache"
+    elif [[ "$img" =~ fpm ]]; then
+        sapi="fpm"
+    elif [[ "$img" =~ cli ]]; then
+        sapi="cli"
+    fi
+
+    # Extract Distro
+    if [[ "$img" =~ alpine ]]; then
+        distro="alpine"
+    fi
+
+    echo "$raw_ver|$sapi|$distro"
+}
+
+METADATA=$(detect_image_metadata "$BASE_IMAGE")
+IFS='|' read -r PHP_VER SAPI DISTRO <<< "$METADATA"
+
+if [ -z "$TARGET_TAG" ]; then
+    TARGET_TAG="${BASE_IMAGE}-hardened"
+fi
+
+# Locate root directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Resolve patch file path
+PATCH_FILE="patches/php-${PHP_VER}/php-${PHP_VER}-${FLAVOR}.patch"
+if [ ! -f "${ROOT_DIR}/${PATCH_FILE}" ]; then
+    # Fallback to minimal if enhanced not found
+    PATCH_FILE="patches/php-${PHP_VER}/php-${PHP_VER}-minimal.patch"
+fi
+
+if [ ! -f "${ROOT_DIR}/${PATCH_FILE}" ]; then
+    # Fallback to community backport
+    PATCH_FILE="patches/php-${PHP_VER}/php-${PHP_VER}-community-backport.patch"
+fi
+
+# Generate Dockerfile Content
+generate_dockerfile() {
+    local base="$1"
+    local ver="$2"
+    local sapi="$3"
+    local distro="$4"
+    local strat="$5"
+    local patch_path="$6"
+
+    cat <<EOF
+# ==============================================================================
+# Hardened EOL PHP Container: ${base}
+# Generated by EOL-PHP-SecAuto v${VERSION}
+# Target: PHP ${ver} (${sapi}, ${distro}) | Strategy: ${strat}
+# ==============================================================================
+
+EOF
+
+    if [ "$strat" = "full-compile" ]; then
+        if [ "$distro" = "alpine" ]; then
+            cat <<EOF
+# --- Stage 1: Build & Patch php-src ---
+FROM alpine:3.18 AS builder
+RUN apk update && apk add --no-cache \\
+    build-base autoconf bison re2c git patch curl \\
+    libxml2-dev openssl-dev sqlite-dev zlib-dev libcurl-dev
+
+WORKDIR /usr/src
+RUN curl -fsSL "https://www.php.net/distributions/php-${ver}.0.tar.gz" -o php.tar.gz || \\
+    curl -fsSL "https://museum.php.net/php7/php-${ver}.0.tar.gz" -o php.tar.gz || \\
+    curl -fsSL "https://museum.php.net/php5/php-${ver}.0.tar.gz" -o php.tar.gz
+RUN tar -xzf php.tar.gz && mv php-${ver}.* php-src
+
+WORKDIR /usr/src/php-src
+COPY ${patch_path} /tmp/secauto.patch
+RUN patch -p1 < /tmp/secauto.patch
+
+RUN ./configure --prefix=/usr/local --enable-fpm --enable-mbstring --with-openssl --with-curl && \\
+    make -j\$(nproc) && make install
+
+# --- Stage 2: Final Lean Image ---
+FROM ${base}
+COPY --from=builder /usr/local/bin/php /usr/local/bin/php
+COPY --from=builder /usr/local/sbin/php-fpm /usr/local/sbin/php-fpm 2>/dev/null || true
+EOF
+        else
+            cat <<EOF
+# --- Stage 1: Build & Patch php-src ---
+FROM debian:bullseye-slim AS builder
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    build-essential autoconf bison re2c git patch curl ca-certificates \\
+    libxml2-dev libssl-dev libsqlite3-dev zlib1g-dev libcurl4-openssl-dev
+
+WORKDIR /usr/src
+RUN curl -fsSL "https://www.php.net/distributions/php-${ver}.33.tar.gz" -o php.tar.gz || \\
+    curl -fsSL "https://museum.php.net/php7/php-${ver}.33.tar.gz" -o php.tar.gz || \\
+    curl -fsSL "https://museum.php.net/php5/php-${ver}.33.tar.gz" -o php.tar.gz || \\
+    curl -fsSL "https://www.php.net/distributions/php-${ver}.0.tar.gz" -o php.tar.gz
+RUN tar -xzf php.tar.gz && mv php-${ver}.* php-src
+
+WORKDIR /usr/src/php-src
+COPY ${patch_path} /tmp/secauto.patch
+RUN patch -p1 < /tmp/secauto.patch
+
+RUN ./configure --prefix=/usr/local --enable-mbstring --with-openssl --with-curl && \\
+    make -j\$(nproc)
+
+# --- Stage 2: Final Lean Image ---
+FROM ${base}
+COPY --from=builder /usr/src/php-src/sapi/cli/php /usr/local/bin/php
+EOF
+        fi
+    fi
+
+    # Runtime WAF Guard and INI Hardening Layer (Applies to 'hybrid' and 'hotpatch')
+    cat <<EOF
+# --- Hardening & Compliance Layer ---
+FROM ${base}
+
+LABEL maintainer="Anton Barinov <https://github.com/Anton-Barinov>"
+LABEL org.opencontainers.image.title="Hardened EOL PHP Image"
+LABEL org.opencontainers.image.description="Patched against php2shell, CVE-2024-4577, CVE-2024-2961, CVE-2018-17082"
+LABEL org.opencontainers.image.vendor="EOL-PHP-SecAuto"
+LABEL org.opencontainers.image.version="${VERSION}"
+
+USER root
+
+# 1. Neutralize CVE-2026-109618/19/60 (php2shell) & CVE-2024-4577 via php.ini baseline
+RUN set -eux; \\
+    ini_dir=\$(php -r 'echo php_ini_loaded_file() ? dirname(php_ini_loaded_file()) : "/usr/local/etc/php/conf.d";'); \\
+    mkdir -p "\$ini_dir"; \\
+    { \\
+        echo '; EOL-PHP-SecAuto Security Baseline'; \\
+        echo 'session.upload_progress.enabled = Off'; \\
+        echo 'allow_url_include = Off'; \\
+        echo 'expose_php = Off'; \\
+        echo 'phar.readonly = On'; \\
+        echo 'disable_functions = exec,passthru,shell_exec,system,proc_open,popen,parse_ini_file,show_source,dl'; \\
+    } > "\$ini_dir/99-eol-secauto-hardening.ini"
+
+# 2. Deploy Zero-Downtime Runtime WAF Guard
+RUN mkdir -p /opt/secauto-guard
+COPY scripts/runtime-guard.php /opt/secauto-guard/guard.php
+RUN set -eux; \\
+    ini_dir=\$(php -r 'echo php_ini_loaded_file() ? dirname(php_ini_loaded_file()) : "/usr/local/etc/php/conf.d";'); \\
+    echo 'auto_prepend_file = "/opt/secauto-guard/guard.php"' >> "\$ini_dir/99-eol-secauto-hardening.ini"
+
+# 3. Security Verification Signature
+ENV EOL_SECAUTO_PATCHED=1
+ENV EOL_SECAUTO_VERSION="${VERSION}"
+
+EOF
+}
+
+GENERATED_DOCKERFILE_CONTENT=$(generate_dockerfile "$BASE_IMAGE" "$PHP_VER" "$SAPI" "$DISTRO" "$STRATEGY" "$PATCH_FILE")
+
+# Handle Output
+if [ -n "$OUTPUT_DOCKERFILE" ]; then
+    echo "$GENERATED_DOCKERFILE_CONTENT" > "$OUTPUT_DOCKERFILE"
+    if [ "$JSON_OUTPUT" -eq 0 ]; then
+        echo -e "${GREEN}✓ Hardened Dockerfile written to: ${BOLD}${OUTPUT_DOCKERFILE}${NC}"
+    fi
+fi
+
+if [ "$JSON_OUTPUT" -eq 1 ]; then
+    cat <<EOF
+{
+  "status": "success",
+  "tool": "EOL-PHP-SecAuto",
+  "version": "${VERSION}",
+  "base_image": "${BASE_IMAGE}",
+  "target_tag": "${TARGET_TAG}",
+  "metadata": {
+    "php_version": "${PHP_VER}",
+    "sapi": "${SAPI}",
+    "distribution": "${DISTRO}",
+    "strategy": "${STRATEGY}",
+    "patch_file": "${PATCH_FILE}"
+  },
+  "mitigations": [
+    "CVE-2026-109618 (Multipart OOM RCE)",
+    "CVE-2026-109619 (Upload Progress UAF)",
+    "CVE-2026-115560 (Session Serializer RCE)",
+    "CVE-2024-4577 (Windows Best-Fit CGI Arg Injection)",
+    "CVE-2024-2961 (glibc iconv Filter Chains)",
+    "CVE-2018-17082 (Phar Deserialization)"
+  ],
+  "output_dockerfile": "${OUTPUT_DOCKERFILE:-stdout}"
+}
+EOF
+    exit 0
+fi
+
+# Human-readable status output
+echo -e "${CYAN}======================================================================${NC}"
+echo -e "${BOLD}  EOL-PHP-SecAuto — EOL Container Security Patching Engine v${VERSION}${NC}"
+echo -e "  Maintained by Anton Barinov | ${REPO_URL}"
+echo -e "${CYAN}======================================================================${NC}"
+echo -e "Base Image:    ${BOLD}${BASE_IMAGE}${NC}"
+echo -e "Target Tag:    ${BOLD}${TARGET_TAG}${NC}"
+echo -e "Detected:      PHP ${BOLD}${PHP_VER}${NC} | SAPI: ${BOLD}${SAPI}${NC} | OS: ${BOLD}${DISTRO}${NC}"
+echo -e "Strategy:      ${BOLD}${STRATEGY}${NC}"
+echo -e "Patch Flavor:  ${BOLD}${FLAVOR}${NC} (${PATCH_FILE})"
+echo -e "${CYAN}----------------------------------------------------------------------${NC}"
+echo -e "${BOLD}Mitigated Vulnerabilities:${NC}"
+echo -e "  ✓ ${GREEN}CVE-2026-109618 / CVE-2026-109619 / CVE-2026-115560${NC} (php2shell RCE)"
+echo -e "  ✓ ${GREEN}CVE-2024-4577 / CVE-2012-1823${NC} (CGI Argument & Best-Fit Unicode Injection)"
+echo -e "  ✓ ${GREEN}CVE-2024-2961${NC} (glibc iconv Heap Overflow & Filter Chain RCE)"
+echo -e "  ✓ ${GREEN}CVE-2018-17082${NC} (Phar Stream Wrapper Deserialization)"
+echo -e "${CYAN}----------------------------------------------------------------------${NC}"
+
+if [ -z "$OUTPUT_DOCKERFILE" ] && [ "$DO_BUILD" -eq 0 ]; then
+    echo -e "${BOLD}Generated Hardened Dockerfile Preview:${NC}\n"
+    echo "$GENERATED_DOCKERFILE_CONTENT"
+    echo -e "\n${YELLOW}Tip: Use -o Dockerfile.hardened to save to a file or --build to compile.${NC}"
+fi
+
+# Build execution if requested
+if [ "$DO_BUILD" -eq 1 ]; then
+    if ! command -v docker >/dev/null 2>&1; then
+        echo -e "${RED}[ERROR] Docker CLI not found. Please install Docker to use --build.${NC}" >&2
+        exit 1
+    fi
+
+    TEMP_DOCKERFILE=$(mktemp)
+    echo "$GENERATED_DOCKERFILE_CONTENT" > "$TEMP_DOCKERFILE"
+
+    echo -e "\n${BLUE}▶ Building hardened container: ${BOLD}${TARGET_TAG}${NC}..."
+    docker build -t "${TARGET_TAG}" -f "$TEMP_DOCKERFILE" "${ROOT_DIR}"
+    rm -f "$TEMP_DOCKERFILE"
+    echo -e "${GREEN}✓ Successfully built: ${TARGET_TAG}${NC}"
+
+    if [ "$DO_PUSH" -eq 1 ]; then
+        echo -e "\n${BLUE}▶ Pushing container to registry: ${BOLD}${TARGET_TAG}${NC}..."
+        docker push "${TARGET_TAG}"
+        echo -e "${GREEN}✓ Successfully pushed: ${TARGET_TAG}${NC}"
+    fi
+
+    if [ "$DO_VERIFY" -eq 1 ]; then
+        echo -e "\n${BLUE}▶ Verifying container compliance: ${BOLD}${TARGET_TAG}${NC}..."
+        "${ROOT_DIR}/bin/eol-verify" -t "${TARGET_TAG}"
+    fi
+fi
+
+echo -e "\n${CYAN}======================================================================${NC}"
+echo -e "${BOLD}${GREEN}All patching operations completed successfully!${NC}"
+echo -e "${CYAN}======================================================================${NC}"

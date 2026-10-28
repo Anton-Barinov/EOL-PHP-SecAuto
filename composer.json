@@ -1,0 +1,30 @@
+{
+  "name": "anton-barinov/eol-php-secauto",
+  "description": "Automated security patcher & hardening engine for EOL PHP Docker containers (PHP 5.4 to 8.1+). Solves container security compliance in CI/CD.",
+  "type": "library",
+  "license": "MIT",
+  "authors": [
+    {
+      "name": "Anton Barinov",
+      "homepage": "https://github.com/Anton-Barinov"
+    }
+  ],
+  "bin": [
+    "bin/eol-php-secauto",
+    "bin/eol-verify"
+  ],
+  "keywords": [
+    "docker",
+    "security",
+    "eol-php",
+    "patching",
+    "github-action",
+    "compliance",
+    "php2shell",
+    "trivy",
+    "cve-2026-109618",
+    "cve-2024-4577",
+    "cve-2024-2961",
+    "cve-2018-17082"
+  ]
+}

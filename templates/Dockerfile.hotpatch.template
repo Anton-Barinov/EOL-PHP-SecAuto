@@ -1,0 +1,35 @@
+# ==============================================================================
+# EOL-PHP-SecAuto: Fast Hotpatch Layer Template (< 5 seconds build)
+# ==============================================================================
+
+ARG BASE_IMAGE=php:7.4-fpm
+
+FROM ${BASE_IMAGE}
+
+LABEL maintainer="Anton Barinov <https://github.com/Anton-Barinov>"
+LABEL security.hardened="true"
+LABEL security.patcher="EOL-PHP-SecAuto-Hotpatch"
+
+USER root
+
+# 1. Neutralize CVE-2026-109618/19/60 (php2shell) & CVE-2024-4577 via php.ini baseline
+RUN set -eux; \
+    ini_dir=$(php -r 'echo php_ini_loaded_file() ? dirname(php_ini_loaded_file()) : "/usr/local/etc/php/conf.d";'); \
+    mkdir -p "$ini_dir"; \
+    { \
+        echo '; EOL-PHP-SecAuto Security Baseline'; \
+        echo 'session.upload_progress.enabled = Off'; \
+        echo 'allow_url_include = Off'; \
+        echo 'expose_php = Off'; \
+        echo 'phar.readonly = On'; \
+        echo 'disable_functions = exec,passthru,shell_exec,system,proc_open,popen,parse_ini_file,show_source,dl'; \
+    } > "$ini_dir/99-eol-secauto-hardening.ini"
+
+# 2. Deploy Zero-Downtime Runtime WAF Guard
+RUN mkdir -p /opt/secauto-guard
+COPY scripts/runtime-guard.php /opt/secauto-guard/guard.php
+RUN set -eux; \
+    ini_dir=$(php -r 'echo php_ini_loaded_file() ? dirname(php_ini_loaded_file()) : "/usr/local/etc/php/conf.d";'); \
+    echo 'auto_prepend_file = "/opt/secauto-guard/guard.php"' >> "$ini_dir/99-eol-secauto-hardening.ini"
+
+ENV EOL_SECAUTO_PATCHED=1

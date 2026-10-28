@@ -1,0 +1,50 @@
+# ==============================================================================
+# EOL-PHP-SecAuto: Alpine Multi-Stage C-Patch Compilation Template
+# ==============================================================================
+
+ARG BASE_IMAGE=php:7.4-fpm-alpine
+ARG PHP_VERSION=7.4
+
+FROM alpine:3.18 AS builder
+ARG PHP_VERSION
+
+RUN apk update && apk add --no-cache \
+    build-base autoconf bison re2c git patch curl \
+    libxml2-dev openssl-dev sqlite-dev zlib-dev libcurl-dev
+
+WORKDIR /usr/src
+RUN curl -fsSL "https://www.php.net/distributions/php-${PHP_VERSION}.33.tar.gz" -o php.tar.gz || \
+    curl -fsSL "https://museum.php.net/php7/php-${PHP_VERSION}.33.tar.gz" -o php.tar.gz || \
+    curl -fsSL "https://www.php.net/distributions/php-${PHP_VERSION}.0.tar.gz" -o php.tar.gz
+
+RUN tar -xzf php.tar.gz && mv php-${PHP_VERSION}.* php-src
+
+WORKDIR /usr/src/php-src
+COPY patches/php-${PHP_VERSION}/php-${PHP_VERSION}-enhanced-universal.patch /tmp/patch.diff
+RUN patch -p1 < /tmp/patch.diff
+
+RUN ./configure --prefix=/usr/local --enable-fpm --enable-mbstring --with-openssl --with-curl && \
+    make -j$(nproc) && make install
+
+# --- Final Lean Production Image ---
+FROM ${BASE_IMAGE}
+
+LABEL maintainer="Anton Barinov <https://github.com/Anton-Barinov>"
+LABEL security.hardened="true"
+LABEL security.patcher="EOL-PHP-SecAuto"
+
+COPY --from=builder /usr/local/bin/php /usr/local/bin/php
+COPY --from=builder /usr/local/sbin/php-fpm /usr/local/sbin/php-fpm 2>/dev/null || true
+
+RUN set -eux; \
+    ini_dir=$(php -r 'echo php_ini_loaded_file() ? dirname(php_ini_loaded_file()) : "/usr/local/etc/php/conf.d";'); \
+    mkdir -p "$ini_dir"; \
+    { \
+        echo '; EOL-PHP-SecAuto Hardening'; \
+        echo 'session.upload_progress.enabled = Off'; \
+        echo 'allow_url_include = Off'; \
+        echo 'expose_php = Off'; \
+        echo 'phar.readonly = On'; \
+    } > "$ini_dir/99-eol-secauto-hardening.ini"
+
+ENV EOL_SECAUTO_PATCHED=1

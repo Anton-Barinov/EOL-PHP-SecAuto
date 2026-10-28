@@ -1,0 +1,6 @@
+.DS_Store
+vendor/
+*.log
+*.tar.gz
+Dockerfile.test
+Dockerfile.hardened

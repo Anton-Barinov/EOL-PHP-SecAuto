@@ -1,0 +1,11 @@
+# Example Dockerfile extending a pre-hardened EOL base image
+FROM php:7.4-fpm-hardened
+
+# Install additional legacy extensions as usual
+RUN docker-php-ext-install pdo pdo_mysql mysqli gd
+
+WORKDIR /var/www/html
+COPY . /var/www/html
+
+EXPOSE 9000
+CMD ["php-fpm"]

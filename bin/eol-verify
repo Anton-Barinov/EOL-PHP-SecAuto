@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# EOL-PHP-SecAuto - Container Security Compliance Verifier (eol-verify)
+# Part of EOL-PHP-SecAuto by Anton Barinov
+# https://github.com/Anton-Barinov/EOL-PHP-SecAuto
+# ==============================================================================
+
+set -euo pipefail
+
+VERSION="1.0.0"
+TARGET_IMAGE=""
+JSON_OUTPUT=0
+
+usage() {
+    cat <<EOF
+Usage: eol-verify [options]
+
+Options:
+  -t, --target <image>   Target Docker image to verify (e.g. php:7.4-fpm-hardened)
+  --json                 Output results in machine-readable JSON format
+  -h, --help             Show this help message
+EOF
+    exit 0
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -t|--target) TARGET_IMAGE="$2"; shift 2 ;;
+        --json) JSON_OUTPUT=1; shift ;;
+        -h|--help) usage ;;
+        *) echo "Unknown option: $1" >&2; usage ;;
+    esac
+done
+
+if [ -z "$TARGET_IMAGE" ]; then
+    echo "Error: target image required (-t/--target)" >&2
+    exit 1
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+    echo "Error: docker command required for eol-verify" >&2
+    exit 1
+fi
+
+# Run verification command inside container
+INSPECT_CMD='php -r "
+    \$progress = (int)ini_get(\"session.upload_progress.enabled\");
+    \$include  = (int)ini_get(\"allow_url_include\");
+    \$expose   = (int)ini_get(\"expose_php\");
+    \$prepend  = (string)ini_get(\"auto_prepend_file\");
+    \$env      = getenv(\"EOL_SECAUTO_PATCHED\");
+    echo \$progress . \"|\" . \$include . \"|\" . \$expose . \"|\" . \$prepend . \"|\" . \$env;
+"'
+
+OUTPUT=$(docker run --rm "${TARGET_IMAGE}" sh -c "$INSPECT_CMD" 2>/dev/null || echo "1|1|1||0")
+IFS='|' read -r UPLOAD_PROGRESS ALLOW_URL_INCLUDE EXPOSE_PHP AUTO_PREPEND ENV_PATCHED <<< "$OUTPUT"
+
+STATUS="COMPLIANT"
+if [ "$UPLOAD_PROGRESS" = "1" ] || [ "$ALLOW_URL_INCLUDE" = "1" ]; then
+    STATUS="NON-COMPLIANT"
+fi
+
+if [ "$JSON_OUTPUT" -eq 1 ]; then
+    cat <<EOF
+{
+  "target_image": "${TARGET_IMAGE}",
+  "compliance_status": "${STATUS}",
+  "checks": {
+    "upload_progress_disabled": $([ "$UPLOAD_PROGRESS" = "0" ] && echo "true" || echo "false"),
+    "allow_url_include_disabled": $([ "$ALLOW_URL_INCLUDE" = "0" ] && echo "true" || echo "false"),
+    "expose_php_disabled": $([ "$EXPOSE_PHP" = "0" ] && echo "true" || echo "false"),
+    "runtime_guard_active": $([[ "$AUTO_PREPEND" =~ guard\.php ]] && echo "true" || echo "false"),
+    "secauto_signature_present": $([ "$ENV_PATCHED" = "1" ] && echo "true" || echo "false")
+  }
+}
+EOF
+    [ "$STATUS" = "COMPLIANT" ] && exit 0 || exit 1
+fi
+
+echo "=========================================================="
+echo "  EOL-PHP-SecAuto Container Compliance Report"
+echo "  Target: ${TARGET_IMAGE}"
+echo "=========================================================="
+if [ "$STATUS" = "COMPLIANT" ]; then
+    echo "  Status: [ PASS: COMPLIANT ]"
+else
+    echo "  Status: [ FAIL: NON-COMPLIANT ]"
+fi
+echo "  - Upload Progress: $([ "$UPLOAD_PROGRESS" = "0" ] && echo "SAFE (Disabled)" || echo "VULNERABLE (Enabled)")"
+echo "  - Allow URL Include: $([ "$ALLOW_URL_INCLUDE" = "0" ] && echo "SAFE (Disabled)" || echo "VULNERABLE (Enabled)")"
+echo "  - Expose PHP: $([ "$EXPOSE_PHP" = "0" ] && echo "SAFE (Hidden)" || echo "INFO (Exposed)")"
+echo "  - Runtime Guard: $([[ "$AUTO_PREPEND" =~ guard\.php ]] && echo "ACTIVE" || echo "INACTIVE")"
+echo "=========================================================="
+
+[ "$STATUS" = "COMPLIANT" ] && exit 0 || exit 1

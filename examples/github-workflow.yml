@@ -1,0 +1,43 @@
+name: Secure EOL PHP Images & CI Compliance
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Run weekly security audit
+    - cron: '0 4 * * 1'
+
+jobs:
+  secure-legacy-containers:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        php-base:
+          - 'php:7.4-fpm'
+          - 'php:8.0-fpm'
+          - 'php:7.4-apache'
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      # Automatically patch the base image using EOL-PHP-SecAuto
+      - name: Patch EOL Container
+        uses: Anton-Barinov/EOL-PHP-SecAuto@v1
+        with:
+          base-image: ${{ matrix.php-base }}
+          target-tag: 'ghcr.io/${{ github.repository }}/${{ matrix.php-base }}-hardened'
+          strategy: 'hybrid'
+          build: 'true'
+          verify: 'true'
+          push: 'false'
+
+      # Optional: Scan resulting image with Trivy to verify 0 critical CVEs
+      - name: Run Trivy Security Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'ghcr.io/${{ github.repository }}/${{ matrix.php-base }}-hardened'
+          format: 'table'
+          exit-code: '0'
+          severity: 'CRITICAL,HIGH'

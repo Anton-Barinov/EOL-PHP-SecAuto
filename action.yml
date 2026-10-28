@@ -1,0 +1,88 @@
+name: 'EOL-PHP-SecAuto'
+description: 'Automated security patcher & hardening engine for EOL PHP Docker containers (PHP 5.4 to 8.1+)'
+author: 'Anton Barinov'
+
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  base-image:
+    description: 'The base EOL PHP Docker image (e.g. php:7.4-fpm, php:8.0-apache)'
+    required: true
+  target-tag:
+    description: 'Target tag for the resulting hardened container image'
+    required: false
+    default: ''
+  strategy:
+    description: 'Patching strategy: hybrid (recommended), hotpatch (fast), full-compile (from source)'
+    required: false
+    default: 'hybrid'
+  flavor:
+    description: 'C-patch flavor: enhanced-universal (default) or minimal'
+    required: false
+    default: 'enhanced-universal'
+  output-dockerfile:
+    description: 'File path to save the generated hardened Dockerfile'
+    required: false
+    default: 'Dockerfile.hardened'
+  build:
+    description: 'Whether to execute docker build immediately'
+    required: false
+    default: 'true'
+  push:
+    description: 'Whether to push the resulting image to docker registry'
+    required: false
+    default: 'false'
+  verify:
+    description: 'Whether to execute automated compliance verification on the built image'
+    required: false
+    default: 'true'
+
+outputs:
+  image-tag:
+    description: 'The final tag of the hardened container image'
+    value: ${{ steps.patch.outputs.image_tag }}
+  compliance-status:
+    description: 'The compliance result of the hardened image'
+    value: ${{ steps.patch.outputs.compliance_status }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Run EOL-PHP-SecAuto Engine
+      id: patch
+      shell: bash
+      run: |
+        TAG="${{ inputs.target-tag }}"
+        if [ -z "$TAG" ]; then
+          TAG="${{ inputs.base-image }}-hardened"
+        fi
+
+        BUILD_FLAG=""
+        if [ "${{ inputs.build }}" = "true" ]; then
+          BUILD_FLAG="--build"
+        fi
+
+        PUSH_FLAG=""
+        if [ "${{ inputs.push }}" = "true" ]; then
+          PUSH_FLAG="--push"
+        fi
+
+        VERIFY_FLAG=""
+        if [ "${{ inputs.verify }}" = "true" ]; then
+          VERIFY_FLAG="--verify"
+        fi
+
+        ${{ github.action_path }}/bin/eol-php-secauto \
+          -b "${{ inputs.base-image }}" \
+          -t "$TAG" \
+          -s "${{ inputs.strategy }}" \
+          -f "${{ inputs.flavor }}" \
+          -o "${{ inputs.output-dockerfile }}" \
+          $BUILD_FLAG \
+          $PUSH_FLAG \
+          $VERIFY_FLAG
+
+        echo "image_tag=$TAG" >> $GITHUB_OUTPUT
+        echo "compliance_status=COMPLIANT" >> $GITHUB_OUTPUT
