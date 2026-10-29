@@ -241,6 +241,7 @@ bash tests/run_tests.sh
 
 ## 🔗 Related Projects in Ecosystem
 
+* **[`EOL-PHP-Armor`](https://github.com/Anton-Barinov/EOL-PHP-Armor)** — 1-line automated security hub & hotpatching engine with C-patches and zero-downtime runtime shield for EOL PHP (5.4–8.1).
 * **[`PHP-Hardening-Kit`](https://github.com/Anton-Barinov/PHP-Hardening-Kit)** — Full-stack runtime WAF guard and server auditor for bare-metal, shared hosting, and VPS.
 * **[`Single-PHP`](https://github.com/Anton-Barinov/Single-PHP)** — Compile PHP projects and dependencies into a single standalone executable binary.
 * **[`PHP-MCP`](https://github.com/Anton-Barinov/PHP-MCP)** — High-performance Model Context Protocol (MCP) server framework for PHP.
