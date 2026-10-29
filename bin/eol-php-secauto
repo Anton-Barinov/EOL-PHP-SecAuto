@@ -292,6 +292,11 @@ LABEL org.opencontainers.image.version="${VERSION}"
 
 USER root
 
+EOF
+
+    # 1. EOL APT Archive Sources fix only for Debian/Ubuntu
+    if [ "$distro" = "debian" ]; then
+        cat <<EOF
 # 1. EOL APT Archive Sources fix for older Debian (Jessie/Stretch/Buster)
 RUN if [ -f /etc/apt/sources.list ]; then \\
         sed -i 's/deb.debian.org/archive.debian.org/g' /etc/apt/sources.list 2>/dev/null || true; \\
@@ -300,6 +305,10 @@ RUN if [ -f /etc/apt/sources.list ]; then \\
         sed -i '/buster-updates/d' /etc/apt/sources.list 2>/dev/null || true; \\
     fi
 
+EOF
+    fi
+
+    cat <<EOF
 # 2. Neutralize CVE-2026-109618/19/60 (php2shell) & CVE-2024-4577 via php.ini baseline
 RUN set -eux; \\
     ini_dir=\$(php -r 'echo php_ini_loaded_file() ? dirname(php_ini_loaded_file()) : "/usr/local/etc/php/conf.d";'); \\
@@ -323,17 +332,25 @@ EOF
         done
     fi
 
-    cat <<EOF
-    } > "\$ini_dir/99-eol-secauto-hardening.ini"
+    local stop_signal="SIGQUIT"
+    if [ "$sapi" = "apache" ]; then
+        stop_signal="SIGWINCH"
+    fi
 
-# 3. Deploy Zero-Downtime Runtime WAF Guard
-RUN mkdir -p /opt/secauto-guard
+    cat <<EOF
+    } > "\$ini_dir/99-eol-secauto-hardening.ini" && \\
+    chmod 644 "\$ini_dir/99-eol-secauto-hardening.ini"
+
+# 3. Deploy Zero-Downtime Runtime WAF Guard (Non-Root compatible 0644)
+RUN mkdir -p /opt/secauto-guard && chmod 755 /opt/secauto-guard
 COPY scripts/runtime-guard.php /opt/secauto-guard/guard.php
 RUN set -eux; \\
     ini_dir=\$(php -r 'echo php_ini_loaded_file() ? dirname(php_ini_loaded_file()) : "/usr/local/etc/php/conf.d";'); \\
-    echo 'auto_prepend_file = "/opt/secauto-guard/guard.php"' >> "\$ini_dir/99-eol-secauto-hardening.ini"
+    echo 'auto_prepend_file = "/opt/secauto-guard/guard.php"' >> "\$ini_dir/99-eol-secauto-hardening.ini"; \\
+    chmod 644 /opt/secauto-guard/guard.php && chmod 644 "\$ini_dir/99-eol-secauto-hardening.ini"
 
-# 4. Security Verification Signature
+# 4. Graceful Container Shutdown Signal & Verification
+STOPSIGNAL ${stop_signal}
 ENV EOL_SECAUTO_PATCHED=1
 ENV EOL_SECAUTO_VERSION="${VERSION}"
 

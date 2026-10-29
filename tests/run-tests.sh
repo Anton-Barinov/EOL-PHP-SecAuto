@@ -21,4 +21,7 @@ php "${SCRIPT_DIR}/test-runtime-guard.php"
 echo -e "\n4. Testing Chaos & Fault Injection Edge Cases..."
 "${SCRIPT_DIR}/test-chaos-faults.sh"
 
+echo -e "\n5. Testing Advanced Non-Root & Multi-Distro Architectural Tests..."
+"${SCRIPT_DIR}/test-advanced-chaos.sh"
+
 echo -e "\nAll EOL-PHP-SecAuto test suites passed successfully!"
