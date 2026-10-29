@@ -34,7 +34,7 @@ Examples:
   # Live container audit:
   eol-verify -t my-repo/php:7.4-fpm-hardened
 EOF
-    exit 0
+    exit "${1:-0}"
 }
 
 while [ $# -gt 0 ]; do
@@ -43,14 +43,14 @@ while [ $# -gt 0 ]; do
         -d|--dockerfile) TARGET_DOCKERFILE="$2"; shift 2 ;;
         --json) JSON_OUTPUT=1; shift ;;
         -v|--version) echo "eol-verify v${VERSION}"; exit 0 ;;
-        -h|--help) usage ;;
-        *) echo "Unknown option: $1" >&2; usage ;;
+        -h|--help) usage 0 ;;
+        *) echo "Unknown option: $1" >&2; usage 1 ;;
     esac
 done
 
 if [ -z "$TARGET_IMAGE" ] && [ -z "$TARGET_DOCKERFILE" ]; then
     echo "Error: target image (-t) or dockerfile (-d) is required." >&2
-    usage
+    usage 1
 fi
 
 # Mode 1: Static Dockerfile Verification

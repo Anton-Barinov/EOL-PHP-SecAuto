@@ -18,4 +18,7 @@ echo -e "\n2. Testing Dockerfile Generator & Static Compliance..."
 echo -e "\n3. Testing Container Runtime Guard Unit Tests..."
 php "${SCRIPT_DIR}/test-runtime-guard.php"
 
+echo -e "\n4. Testing Chaos & Fault Injection Edge Cases..."
+"${SCRIPT_DIR}/test-chaos-faults.sh"
+
 echo -e "\nAll EOL-PHP-SecAuto test suites passed successfully!"

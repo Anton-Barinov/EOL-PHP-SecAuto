@@ -76,7 +76,7 @@ Examples:
   # Hotpatch existing Dockerfile without recompile:
   eol-php-secauto -d ./Dockerfile -s hotpatch -o ./Dockerfile.patched
 EOF
-    exit 0
+    exit "${1:-0}"
 }
 
 # Parse CLI options
@@ -94,10 +94,29 @@ while [ $# -gt 0 ]; do
         --verify) DO_VERIFY=1; shift ;;
         --json) JSON_OUTPUT=1; shift ;;
         -v|--version) echo "eol-php-secauto v${VERSION}"; exit 0 ;;
-        -h|--help) usage ;;
-        *) echo "Unknown option: $1" >&2; usage ;;
+        -h|--help) usage 0 ;;
+        *) echo "Unknown option: $1" >&2; usage 1 ;;
     esac
 done
+
+# Validate strategy & flavor
+case "$STRATEGY" in
+    hybrid|hotpatch|full-compile) ;;
+    *) echo -e "${RED}[ERROR] Unsupported strategy: '${STRATEGY}'. Must be 'hybrid', 'hotpatch', or 'full-compile'.${NC}" >&2; exit 1 ;;
+esac
+
+case "$FLAVOR" in
+    enhanced-universal|minimal) ;;
+    *) echo -e "${RED}[ERROR] Unsupported patch flavor: '${FLAVOR}'. Must be 'enhanced-universal' or 'minimal'.${NC}" >&2; exit 1 ;;
+esac
+
+# Validate extra-ini safety
+if [ -n "$EXTRA_INI" ]; then
+    if [[ "$EXTRA_INI" =~ [\`\$\'\"\\] ]]; then
+        echo -e "${RED}[ERROR] Illegal shell characters detected in --extra-ini. Only standard INI directives (key=val) allowed.${NC}" >&2
+        exit 1
+    fi
+fi
 
 # If Dockerfile is provided, extract FROM image (handling multi-stage builds)
 if [ -n "$DOCKERFILE_IN" ]; then
@@ -117,7 +136,13 @@ fi
 
 if [ -z "$BASE_IMAGE" ]; then
     echo -e "${RED}[ERROR] Base image is required (-b/--base or -d/--dockerfile).${NC}" >&2
-    usage
+    usage 1
+fi
+
+# Validate BASE_IMAGE characters
+if ! [[ "$BASE_IMAGE" =~ ^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)*(:[a-zA-Z0-9_.-]+)?$ ]]; then
+    echo -e "${RED}[ERROR] Invalid base image format: '${BASE_IMAGE}'. Must be a valid Docker image reference.${NC}" >&2
+    exit 1
 fi
 
 # Detect PHP Version and SAPI from base image name
