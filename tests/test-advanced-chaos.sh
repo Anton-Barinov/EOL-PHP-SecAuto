@@ -77,6 +77,17 @@ echo -e "\n4. Testing Docker Layer Caching & Build Optimization..."
 LAYER_COUNT=$(grep -c '^RUN' "$DF_NON_ROOT")
 assert_test "Hardening layer uses <= 4 RUN statements" "$([ "$LAYER_COUNT" -le 4 ] && echo "true" || echo "false")" "Only ${LAYER_COUNT} RUN layer(s) generated"
 
+# -------------------------------------------------------------
+# 5. Mirror Resilience & APT Check-Valid-Until Fix
+# -------------------------------------------------------------
+echo -e "\n5. Testing Debian EOL Mirror Resilience..."
+
+HAS_CHECK_VALID=$(grep -qi '99no-check-valid-until' "$DF_NON_ROOT" && echo "true" || echo "false")
+assert_test "Debian image disables Check-Valid-Until for expired archive mirrors" "$HAS_CHECK_VALID" "Prevents apt-get update failure on archive.debian.org"
+
+HAS_TRAP=$(grep -qi 'trap cleanup EXIT INT TERM' "$BIN" && echo "true" || echo "false")
+assert_test "CLI implements trap for graceful temporary file cleanup" "$HAS_TRAP" "Ensures no orphan files on SIGINT/SIGTERM"
+
 echo -e "\n---------------------------------------------------------"
 echo "Results: ${PASS} Passed, ${FAIL} Failed"
 echo "---------------------------------------------------------"

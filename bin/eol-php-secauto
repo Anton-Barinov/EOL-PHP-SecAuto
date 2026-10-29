@@ -23,6 +23,19 @@ DO_PUSH=0
 DO_VERIFY=0
 JSON_OUTPUT=0
 
+# Graceful signal handling & cleanup of temporary files
+TEMP_FILES=()
+cleanup() {
+    local exit_code=$?
+    for f in "${TEMP_FILES[@]}"; do
+        if [ -f "$f" ] || [ -d "$f" ]; then
+            rm -rf "$f" 2>/dev/null || true
+        fi
+    done
+    exit "$exit_code"
+}
+trap cleanup EXIT INT TERM
+
 # Formatting
 if [ -t 1 ] && [ "${NO_COLOR:-0}" = "0" ]; then
     RED=$'\033[0;31m'
@@ -303,6 +316,8 @@ RUN if [ -f /etc/apt/sources.list ]; then \\
         sed -i 's|security.debian.org/debian-security|archive.debian.org/debian-security|g' /etc/apt/sources.list 2>/dev/null || true; \\
         sed -i '/stretch-updates/d' /etc/apt/sources.list 2>/dev/null || true; \\
         sed -i '/buster-updates/d' /etc/apt/sources.list 2>/dev/null || true; \\
+        echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check-valid-until 2>/dev/null || true; \\
+        echo 'Acquire::Retries "3";' >> /etc/apt/apt.conf.d/99no-check-valid-until 2>/dev/null || true; \\
     fi
 
 EOF
